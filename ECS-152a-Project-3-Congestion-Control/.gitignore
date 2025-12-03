@@ -1,0 +1,7 @@
+# Test implementations (for TA use only)
+tests/
+
+docker/test_fairness.sh
+*.log
+*.pdf
+.DS_Store
