@@ -11,14 +11,11 @@ from typing import List, Tuple
 PACKET_SIZE = 1024
 SEQ_ID_SIZE = 4
 MSS = PACKET_SIZE - SEQ_ID_SIZE
-ACK_TIMEOUT = 0.2
-MAX_TIMEOUTS = 5
+ACK_TIMEOUT = 1.0
+MAX_TIMEOUTS = 50
 
 HOST = os.environ.get("RECEIVER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("RECEIVER_PORT", "5001"))
-
-delays = []
-total_payload_bytes = 0
 
 
 def load_payload_chunks() -> List[bytes]:
@@ -91,7 +88,7 @@ def send_packet(sock, addr, packet):
     packet["last_send_time"] = now
 
     pkt = make_packet(packet["seq_id"], packet["payload"])
-    print(f"Sending seq={packet['seq_id']}, bytes={len(packet['payload'])}")
+    # print(f"Sending seq={packet['seq_id']}, bytes={len(packet['payload'])}")
     sock.sendto(pkt, addr)
 
 
@@ -105,13 +102,8 @@ def handle_timeout(sock, addr, packets, base: int, RTO: float) -> None:
         return
 
     if now - oldest["last_send_time"] >= RTO:
-        # retransmit all unacked packets starting from base
-        idx = base
-        while idx < len(packets):
-            p = packets[idx]
-            if not p["acked"]:
-                send_packet(sock, addr, p)
-            idx += 1
+        # only retransmit the oldest unacked packet
+        send_packet(sock, addr, oldest)
 
 
 def handle_ack(ack_pkt: bytes, packets: list[dict]) -> bool:
@@ -143,7 +135,12 @@ def find_new_base(packets: list[dict], base: int) -> int:
 
 
 def main() -> None:
+    global delays, total_payload_bytes
+    delays = []
+    total_payload_bytes = 0
     chunks = load_payload_chunks()
+
+    # chunks = chunks[:500]
 
     if not chunks:
         print("No payload file found", file=sys.stderr)
@@ -186,13 +183,13 @@ def main() -> None:
         sock.settimeout(ACK_TIMEOUT)
         addr = (HOST, PORT)
 
-        # WINDOW_SIZE = 100
-        WINDOW_SIZE = 5
-        RTO = 0.2
+        WINDOW_SIZE = 100
+        RTO = 1.0
 
         base = 0
         next_to_send = 0
         num_packets = len(packets)
+        timeout_count = 0
 
         while base < num_packets:
             while next_to_send < num_packets and next_to_send < base + WINDOW_SIZE:
@@ -202,6 +199,7 @@ def main() -> None:
 
             try:
                 ack_pkt, _ = sock.recvfrom(PACKET_SIZE)
+                timeout_count = 0
                 fin_seen = handle_ack(ack_pkt, packets)
                 base = find_new_base(packets, base)
                 if fin_seen:
@@ -214,7 +212,11 @@ def main() -> None:
                     print_metrics(duration, throughput, avg_delay, avg_jitter)
                     return
             except socket.timeout:
+                timeout_count += 1
                 handle_timeout(sock, addr, packets, base, RTO)
+                if timeout_count > MAX_TIMEOUTS:
+                    print("Too many timeouts, aborting this run", file=sys.stderr)
+                    break
 
         while True:
             try:
